@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Deep Randy Face - local animation</title>
+<style>
+body{font:16px system-ui;max-width:720px;margin:40px auto;padding:0 18px;color:#202124}form{display:grid;gap:14px}label{display:grid;gap:6px}input,button{font:inherit;padding:10px}button{cursor:pointer}video{width:100%;margin-top:20px;background:#111}
+</style>
+<h1>Local portrait animation</h1>
+<p>Upload an image and create a local MP4 preview. Files stay on this machine.</p>
+<form id="form"><label>Portrait <input name="photo" type="file" accept="image/*" required></label><label>Motion prompt <input name="prompt" value="поворот направо на 20 градусов" required></label><button>Create MP4</button></form>
+<p id="status"></p><video id="video" controls hidden></video>
+<script>
+const form=document.querySelector('#form'), status=document.querySelector('#status'), video=document.querySelector('#video');
+form.addEventListener('submit',async e=>{e.preventDefault();status.textContent='Rendering...';video.hidden=true;const r=await fetch('/api/render',{method:'POST',body:new FormData(form)});const d=await r.json();if(!r.ok){status.textContent=d.detail||'Render failed';return}status.textContent='Done';video.src=d.video_url;video.hidden=false;});
+</script>

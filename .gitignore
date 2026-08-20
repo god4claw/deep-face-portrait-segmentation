@@ -1,0 +1,14 @@
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+out/
+uploads/
+*.mp4
+*.y4m
+*.pth
+*.onnx
+*.pt
+*.ckpt
+.env
+
