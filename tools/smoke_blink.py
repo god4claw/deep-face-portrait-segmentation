@@ -22,7 +22,7 @@ def main() -> None:
     track["eye_open"][:] = 1.0
     track["eye_open"][5:10] = np.array([0.65, 0.2, 0.0, 0.3, 0.75], dtype=np.float32)
     renderer = PortraitRenderer(args.liveportrait_root)
-    renderer.render(track, args.source, args.output, preview=True, prefer_nvenc=True,
+    renderer.render(track, args.source, args.output, preview=True, aspect="source", prefer_nvenc=True,
                     progress=lambda value, stage: print(f"{value:.4f} {stage}", flush=True))
 
 

@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from PIL import Image, UnidentifiedImageError
 
 from motion import MotionSpec, generate, prompt_to_spec
-from render import PortraitRenderer
+from render import ASPECT_RATIOS, PortraitRenderer
 
 ROOT = Path(__file__).parent
 UPLOADS = ROOT / "uploads"
@@ -103,7 +103,7 @@ def set_job(job_id: str, **changes) -> None:
 
 
 def run_job(job_id: str, photo_path: Path, prompt: str, mode: str,
-            zoom: float, gaze: float, brow: float, prefer_nvenc: bool) -> None:
+            zoom: float, gaze: float, brow: float, aspect: str, fit: str, prefer_nvenc: bool) -> None:
     try:
         set_job(job_id, status="running", stage="loading models", progress=0.01)
         fps = 15 if mode == "preview" else 30
@@ -113,7 +113,7 @@ def run_job(job_id: str, photo_path: Path, prompt: str, mode: str,
         def on_progress(value: float, stage: str) -> None:
             set_job(job_id, progress=round(value, 4), stage=stage)
 
-        meta = get_renderer().render(track, photo_path, output, preview=mode == "preview",
+        meta = get_renderer().render(track, photo_path, output, preview=mode == "preview", aspect=aspect, fit=fit,
                                      prefer_nvenc=prefer_nvenc, progress=on_progress)
         if not output.exists() or output.stat().st_size == 0:
             raise RuntimeError("renderer returned without a non-empty MP4")
@@ -170,6 +170,7 @@ def parse_prompt(request: ParseRequest):
 @app.post("/api/render")
 def create_render(photo_id: str = Form(...), prompt: str = Form(...), mode: str = Form("preview"),
                   zoom: float = Form(0.0), gaze: float = Form(0.0), brow: float = Form(0.0),
+                  aspect: str = Form("source"), fit: str = Form("contain"),
                   prefer_nvenc: bool = Form(True)):
     if mode not in {"preview", "final"}:
         raise HTTPException(400, "mode must be preview or final")
@@ -177,6 +178,10 @@ def create_render(photo_id: str = Form(...), prompt: str = Form(...), mode: str 
         raise HTTPException(400, "prompt must be 1-500 characters")
     if any(value < 0 or value > 1 for value in (zoom, gaze, brow)):
         raise HTTPException(400, "control values must be between 0 and 1")
+    if aspect not in ASPECT_RATIOS:
+        raise HTTPException(400, "unsupported aspect ratio")
+    if fit not in {"contain", "cover"}:
+        raise HTTPException(400, "fit must be contain or cover")
     if not valid_hex_id(photo_id, 64):
         raise HTTPException(400, "invalid photo id")
     photo_path = UPLOADS / f"{photo_id}.jpg"
@@ -188,7 +193,7 @@ def create_render(photo_id: str = Form(...), prompt: str = Form(...), mode: str 
         job_id = uuid.uuid4().hex
         jobs[job_id] = {"job_id": job_id, "status": "queued", "progress": 0.0,
                         "stage": "queued", "mode": mode, "created_at": time.time()}
-    executor.submit(run_job, job_id, photo_path, prompt.strip(), mode, zoom, gaze, brow, prefer_nvenc)
+    executor.submit(run_job, job_id, photo_path, prompt.strip(), mode, zoom, gaze, brow, aspect, fit, prefer_nvenc)
     return {"job_id": job_id, "status_url": f"/api/job/{job_id}"}
 
 

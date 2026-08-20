@@ -34,8 +34,9 @@ Weights stay in the external LivePortrait checkout and are excluded from git.
 python -m uvicorn server:app --host 127.0.0.1 --port 8000
 ```
 
-Open `http://127.0.0.1:8000`. The UI provides image upload, prompt parsing,
-preview/final modes, zoom/gaze/brow controls, progress, and MP4 playback.
+Open `http://127.0.0.1:8000`. The UI provides adaptive image upload, prompt
+parsing, preview/final modes, source/common output aspect ratios, contain/cover
+framing, zoom/gaze/brow controls, progress, and MP4 playback.
 
 API flow:
 
@@ -53,6 +54,7 @@ removed after 24 hours. At most four queued/running jobs are accepted.
 ```powershell
 python render.py --src .\portrait.jpg `
   --prompt "поворот направо на 20 градусов" `
+  --aspect 4:3 --fit contain `
   --zoom 0.2 --gaze 0.2 --brow 0.2 `
   --out .\out\portrait.mp4
 ```

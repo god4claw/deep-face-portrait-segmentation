@@ -22,6 +22,14 @@ from PIL import Image
 from motion import generate, to_json
 
 Progress = Callable[[float, str], None]
+ASPECT_RATIOS = {
+    "source": None,
+    "1:1": 1.0,
+    "4:3": 4 / 3,
+    "3:4": 3 / 4,
+    "16:9": 16 / 9,
+    "9:16": 9 / 16,
+}
 
 
 @dataclass
@@ -55,6 +63,32 @@ def encode_png_sequence(frame_dir: Path, fps: int, output: Path, *, prefer_nvenc
             return encoder
         errors.append(f"{encoder}: exit={result.returncode} {result.stderr[-800:]}")
     raise RuntimeError("video encoding failed\n" + "\n".join(errors))
+
+
+def frame_to_canvas(frame: np.ndarray, aspect: str, fit: str, max_h: int) -> np.ndarray:
+    if aspect not in ASPECT_RATIOS:
+        raise ValueError(f"unsupported aspect ratio: {aspect}")
+    if fit not in {"contain", "cover"}:
+        raise ValueError(f"unsupported fit mode: {fit}")
+    ratio = ASPECT_RATIOS[aspect]
+    if ratio is None:
+        return frame
+    canvas_h = max(2, max_h - max_h % 2)
+    canvas_w = max(2, round(canvas_h * ratio / 2) * 2)
+    image = Image.fromarray(frame)
+    if fit == "contain":
+        scale = min(canvas_w / image.width, canvas_h / image.height)
+        resized = image.resize((max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                               Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", (canvas_w, canvas_h), (16, 20, 22))
+        canvas.paste(resized, ((canvas_w - resized.width) // 2, (canvas_h - resized.height) // 2))
+        return np.asarray(canvas)
+    scale = max(canvas_w / image.width, canvas_h / image.height)
+    resized = image.resize((max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                           Image.Resampling.LANCZOS)
+    left = max(0, (resized.width - canvas_w) // 2)
+    top = max(0, (resized.height - canvas_h) // 2)
+    return np.asarray(resized.crop((left, top, left + canvas_w, top + canvas_h)))
 
 
 class PortraitRenderer:
@@ -137,13 +171,14 @@ class PortraitRenderer:
         return delta
 
     def render(self, track: dict, source_path: Path, output: Path, *, preview: bool,
-               prefer_nvenc: bool = True, progress: Progress | None = None) -> dict:
+               aspect: str = "source", fit: str = "contain", prefer_nvenc: bool = True,
+               progress: Progress | None = None) -> dict:
         import torch
         from src.utils.camera import get_rotation_matrix
         from src.utils.crop import paste_back
 
         callback = progress or (lambda value, stage: None)
-        max_h = 512 if preview else 720
+        max_h = 360 if preview else 720
         callback(0.02, "preparing source")
         with self.lock, torch.no_grad():
             state = self.prepare_source(source_path, max_h=max_h)
@@ -170,13 +205,15 @@ class PortraitRenderer:
                         x_d = x_d + self.wrapper.retarget_eye(state.x_s, combined)
                     x_d = self.wrapper.stitching(state.x_s, x_d)
                     crop_frame = self.wrapper.parse_output(self.wrapper.warp_decode(state.f_s, state.x_s, x_d)["out"])[0]
-                    frame = crop_frame if preview else paste_back(crop_frame, state.m_c2o, state.image_rgb, state.mask_ori)
+                    frame = paste_back(crop_frame, state.m_c2o, state.image_rgb, state.mask_ori)
+                    frame = frame_to_canvas(frame, aspect, fit, max_h)
                     Image.fromarray(frame).save(frame_dir / f"{i:06d}.png", compress_level=1)
                     callback(0.08 + 0.80 * (i + 1) / n_frames, f"rendering {i + 1}/{n_frames}")
                 callback(0.90, "encoding video")
                 encoder = encode_png_sequence(frame_dir, fps, output, prefer_nvenc=prefer_nvenc)
         callback(1.0, "complete")
-        return {"encoder": encoder, "frames": n_frames, "fps": fps, "cache_entries": len(self.cache)}
+        return {"encoder": encoder, "frames": n_frames, "fps": fps, "cache_entries": len(self.cache),
+                "width": int(frame.shape[1]), "height": int(frame.shape[0]), "aspect": aspect, "fit": fit}
 
 
 def main() -> None:
@@ -191,12 +228,15 @@ def main() -> None:
     parser.add_argument("--zoom", type=float, default=0.0)
     parser.add_argument("--gaze", type=float, default=0.0)
     parser.add_argument("--brow", type=float, default=0.0)
+    parser.add_argument("--aspect", choices=ASPECT_RATIOS, default="source")
+    parser.add_argument("--fit", choices=("contain", "cover"), default="contain")
     args = parser.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     track = generate(args.prompt, zoom=args.zoom, gaze=args.gaze, brow=args.brow)
     to_json(track, str(args.out.with_suffix(".motion.json")))
     renderer = PortraitRenderer(args.liveportrait_root)
-    meta = renderer.render(track, args.src, args.out, preview=args.preview, prefer_nvenc=not args.no_nvenc,
+    meta = renderer.render(track, args.src, args.out, preview=args.preview, aspect=args.aspect, fit=args.fit,
+                           prefer_nvenc=not args.no_nvenc,
                            progress=lambda p, s: print(f"{p:6.1%} {s}", flush=True))
     print(json.dumps({"output": str(args.out), **meta}))
 

@@ -39,3 +39,12 @@ def test_missing_photo_does_not_queue_job():
 def test_photo_id_rejects_path_syntax():
     render = client.post("/api/render", data={"photo_id": "../portrait", "prompt": "test", "mode": "preview"})
     assert render.status_code == 400
+
+
+def test_render_rejects_unknown_framing_values():
+    invalid_aspect = client.post("/api/render", data={"photo_id": "0" * 64, "prompt": "test",
+                                                       "mode": "preview", "aspect": "5:2"})
+    assert invalid_aspect.status_code == 400
+    invalid_fit = client.post("/api/render", data={"photo_id": "0" * 64, "prompt": "test",
+                                                    "mode": "preview", "fit": "stretch"})
+    assert invalid_fit.status_code == 400
