@@ -1,16 +1,39 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Deep Randy Face - local animation</title>
+<title>Portrait Motion</title>
 <style>
-body{font:16px system-ui;max-width:720px;margin:40px auto;padding:0 18px;color:#202124}form{display:grid;gap:14px}label{display:grid;gap:6px}input,button{font:inherit;padding:10px}button{cursor:pointer}video{width:100%;margin-top:20px;background:#111}
+:root{color-scheme:light;--ink:#172026;--muted:#647078;--line:#d9dfe2;--paper:#f5f7f7;--accent:#176b5c;--dark:#20282d}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.45 system-ui,sans-serif;letter-spacing:0}header{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 24px;background:#fff;border-bottom:1px solid var(--line)}header strong{font-size:16px}header span{color:var(--muted);font-size:13px}.layout{display:grid;grid-template-columns:minmax(280px,360px) minmax(0,1fr);min-height:calc(100vh - 58px)}aside{padding:22px;background:#fff;border-right:1px solid var(--line);overflow:auto}main{padding:22px;min-width:0}.field{display:grid;gap:7px;margin-bottom:17px}.field>span,.section-title{font-size:12px;font-weight:700;text-transform:uppercase;color:#4e5a60}.drop{position:relative;aspect-ratio:4/3;border:1px dashed #9ba7ac;background:#edf1f1;display:grid;place-items:center;overflow:hidden}.drop img{width:100%;height:100%;object-fit:cover}.drop input{position:absolute;inset:0;opacity:0;cursor:pointer}input[type=text]{width:100%;border:1px solid var(--line);padding:10px;background:#fff;font:inherit}input[type=range]{width:100%;accent-color:var(--accent)}.range-row{display:grid;grid-template-columns:70px 1fr 36px;align-items:center;gap:8px;margin:10px 0}.range-row output{text-align:right;font-variant-numeric:tabular-nums}.modes{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line)}.modes label{padding:9px;text-align:center;cursor:pointer}.modes label:has(input:checked){background:var(--dark);color:#fff}.modes input{display:none}.actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:18px}button{border:0;padding:11px 13px;font:inherit;font-weight:700;cursor:pointer;background:var(--accent);color:#fff}button.secondary{background:#e7ecec;color:var(--ink)}button:disabled{opacity:.5;cursor:wait}.workspace{max-width:1040px;margin:auto}.viewer{aspect-ratio:16/9;background:#151a1d;display:grid;place-items:center;overflow:hidden}.viewer video{width:100%;height:100%;object-fit:contain}.empty{color:#9ca7ab}.progress-wrap{height:5px;background:#dfe4e5;margin-top:12px}.progress{height:100%;width:0;background:var(--accent);transition:width .2s}.status{display:flex;justify-content:space-between;color:var(--muted);margin:8px 0 24px;font-size:13px}.timeline{width:100%;border-collapse:collapse;background:#fff}.timeline th,.timeline td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;font-size:13px}.timeline th{color:var(--muted);font-weight:600}.timeline td:last-child,.timeline th:last-child{text-align:right}.notice{padding:10px 0;color:#a33;min-height:20px}@media(max-width:760px){.layout{grid-template-columns:1fr}.layout aside{border-right:0;border-bottom:1px solid var(--line)}main{padding:14px}header{padding:0 14px}.actions{grid-template-columns:1fr}}
 </style>
-<h1>Local portrait animation</h1>
-<p>Upload an image and create a local MP4 preview. Files stay on this machine.</p>
-<form id="form"><label>Portrait <input name="photo" type="file" accept="image/*" required></label><label>Motion prompt <input name="prompt" value="поворот направо на 20 градусов" required></label><button>Create MP4</button></form>
-<p id="status"></p><video id="video" controls hidden></video>
+<header><strong>Portrait Motion</strong><span id="health">local renderer</span></header>
+<div class="layout">
+<aside>
+  <div class="field"><span>Портрет</span><label class="drop"><span id="dropText">Выбрать изображение</span><img id="source" hidden><input id="photo" type="file" accept="image/jpeg,image/png,image/webp"></label></div>
+  <div class="field"><span>Движение</span><input id="prompt" type="text" value="поворот направо на 20 градусов"></div>
+  <div class="field"><span>Режим</span><div class="modes"><label><input type="radio" name="mode" value="preview" checked>Preview 256 / 15</label><label><input type="radio" name="mode" value="final">Final 720 / 30</label></div></div>
+  <div class="section-title">Художественные controls</div>
+  <div class="range-row"><label for="zoom">Zoom</label><input id="zoom" type="range" min="0" max="1" step="0.05" value="0"><output>0.00</output></div>
+  <div class="range-row"><label for="gaze">Взгляд</label><input id="gaze" type="range" min="0" max="1" step="0.05" value="0"><output>0.00</output></div>
+  <div class="range-row"><label for="brow">Брови</label><input id="brow" type="range" min="0" max="1" step="0.05" value="0"><output>0.00</output></div>
+  <div class="actions"><button id="parse" class="secondary">Разобрать</button><button id="render">Рендер</button></div>
+  <div class="notice" id="error"></div>
+</aside>
+<main><div class="workspace">
+  <div class="viewer"><span class="empty" id="empty">Готовое видео появится здесь</span><video id="video" controls hidden></video></div>
+  <div class="progress-wrap"><div class="progress" id="progress"></div></div>
+  <div class="status"><span id="stage">Ожидание</span><span id="percent">0%</span></div>
+  <div class="section-title" style="margin-bottom:8px">Фазы prompt</div>
+  <table class="timeline"><thead><tr><th>Старт</th><th>Ось</th><th>Из → в</th><th>Длительность</th></tr></thead><tbody id="phases"><tr><td colspan="4">Нажмите «Разобрать»</td></tr></tbody></table>
+</div></main></div>
 <script>
-const form=document.querySelector('#form'), status=document.querySelector('#status'), video=document.querySelector('#video');
-form.addEventListener('submit',async e=>{e.preventDefault();status.textContent='Rendering...';video.hidden=true;const r=await fetch('/api/render',{method:'POST',body:new FormData(form)});const d=await r.json();if(!r.ok){status.textContent=d.detail||'Render failed';return}status.textContent='Done';video.src=d.video_url;video.hidden=false;});
+const $=s=>document.querySelector(s), photo=$('#photo'), source=$('#source'), dropText=$('#dropText'), prompt=$('#prompt'), error=$('#error'), renderBtn=$('#render'), parseBtn=$('#parse'), progress=$('#progress'), stage=$('#stage'), percent=$('#percent'), video=$('#video'), empty=$('#empty');let photoId='';
+for(const slider of document.querySelectorAll('input[type=range]'))slider.addEventListener('input',()=>slider.nextElementSibling.value=Number(slider.value).toFixed(2));
+async function jsonFetch(url,options){const r=await fetch(url,options),d=await r.json();if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:'Request failed');return d}
+photo.addEventListener('change',async()=>{error.textContent='';if(!photo.files[0])return;const fd=new FormData();fd.append('photo',photo.files[0]);try{stage.textContent='Загрузка';const d=await jsonFetch('/api/upload',{method:'POST',body:fd});photoId=d.photo_id;source.src=d.preview_url;source.hidden=false;dropText.hidden=true;stage.textContent=`${d.width} × ${d.height}`;}catch(e){error.textContent=e.message}});
+async function parsePrompt(){error.textContent='';try{const d=await jsonFetch('/api/parse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:prompt.value})});$('#phases').innerHTML=d.segments.length?d.segments.map(s=>`<tr><td>${s.start.toFixed(2)} с</td><td>${s.axis}</td><td>${s.frm.toFixed(1)}° → ${s.to.toFixed(1)}°</td><td>${s.duration.toFixed(2)} с</td></tr>`).join(''):'<tr><td colspan="4">Команды движения не найдены</td></tr>';stage.textContent=`${d.duration.toFixed(2)} с · ${d.n_frames} кадров`;}catch(e){error.textContent=e.message}}
+parseBtn.addEventListener('click',parsePrompt);prompt.addEventListener('change',parsePrompt);
+renderBtn.addEventListener('click',async()=>{error.textContent='';if(!photoId){error.textContent='Сначала выберите портрет';return}renderBtn.disabled=true;video.hidden=true;empty.hidden=false;progress.style.width='0';const fd=new FormData();fd.append('photo_id',photoId);fd.append('prompt',prompt.value);fd.append('mode',document.querySelector('input[name=mode]:checked').value);for(const id of ['zoom','gaze','brow'])fd.append(id,$('#'+id).value);fd.append('prefer_nvenc','true');try{const d=await jsonFetch('/api/render',{method:'POST',body:fd});poll(d.job_id)}catch(e){error.textContent=e.message;renderBtn.disabled=false}});
+async function poll(id){try{const d=await jsonFetch('/api/job/'+id);progress.style.width=(d.progress*100)+'%';percent.textContent=Math.round(d.progress*100)+'%';stage.textContent=d.stage;if(d.status==='complete'){video.src=d.video_url+'?t='+Date.now();video.hidden=false;empty.hidden=true;renderBtn.disabled=false;return}if(d.status==='failed')throw new Error(d.error||'Render failed');setTimeout(()=>poll(id),500)}catch(e){error.textContent=e.message;renderBtn.disabled=false}}
+fetch('/api/health').then(r=>r.json()).then(d=>$('#health').textContent=d.model_loaded?'GPU model loaded':'GPU model loads on first render');parsePrompt();
 </script>

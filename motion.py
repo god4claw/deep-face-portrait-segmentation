@@ -300,19 +300,58 @@ def blink_track(spec: MotionSpec, rng: np.random.Generator) -> tuple:
     return track, times
 
 
-def generate(prompt: str, spec: MotionSpec | None = None) -> dict:
+def artistic_tracks(
+    spec: MotionSpec,
+    yaw: np.ndarray,
+    pitch: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    zoom: float = 0.0,
+    gaze: float = 0.0,
+    brow: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Create restrained, deterministic artistic controls for LivePortrait."""
+    n = spec.n_frames()
+    t = np.arange(n, dtype=np.float32) / spec.fps
+    zoom_track = 1.0 + np.clip(zoom, 0.0, 1.0) * 0.08 * _min_jerk(t / max(spec.total_duration(), 1e-6))
+    phase_x, phase_y = rng.uniform(0, 2 * np.pi, size=2)
+    gaze_gain = np.clip(gaze, 0.0, 1.0)
+    gaze_x = gaze_gain * (-0.18 * yaw + 3.0 * np.sin(2 * np.pi * 0.23 * t + phase_x))
+    gaze_y = gaze_gain * (-0.12 * pitch + 2.0 * np.sin(2 * np.pi * 0.17 * t + phase_y))
+    brow_track = np.clip(brow, 0.0, 1.0) * (2.5 - 0.25 * gaze_y + 0.8 * np.sin(2 * np.pi * 0.13 * t))
+    return tuple(np.asarray(x, dtype=np.float32) for x in (zoom_track, gaze_x, gaze_y, brow_track))
+
+
+def generate(
+    prompt: str,
+    spec: MotionSpec | None = None,
+    *,
+    zoom: float = 0.0,
+    gaze: float = 0.0,
+    brow: float = 0.0,
+) -> dict:
     spec = prompt_to_spec(prompt, spec)
     rng = np.random.default_rng(spec.seed)
 
     eye_open, blink_times = blink_track(spec, rng)
+    yaw = render_axis(spec, "yaw") + micro_motion(spec, rng, 1.0)
+    pitch = render_axis(spec, "pitch") + micro_motion(spec, rng, 0.6)
+    roll = render_axis(spec, "roll") + micro_motion(spec, rng, 0.4)
+    zoom_track, gaze_x, gaze_y, brow_track = artistic_tracks(
+        spec, yaw, pitch, rng, zoom=zoom, gaze=gaze, brow=brow
+    )
     return {
         "prompt": prompt,
         "fps": spec.fps,
         "duration": spec.total_duration(),
         "n_frames": spec.n_frames(),
-        "yaw": render_axis(spec, "yaw") + micro_motion(spec, rng, 1.0),
-        "pitch": render_axis(spec, "pitch") + micro_motion(spec, rng, 0.6),
-        "roll": render_axis(spec, "roll") + micro_motion(spec, rng, 0.4),
+        "yaw": yaw,
+        "pitch": pitch,
+        "roll": roll,
+        "zoom": zoom_track,
+        "gaze_x": gaze_x,
+        "gaze_y": gaze_y,
+        "brow": brow_track,
         "eye_open": eye_open,
         "blink_times": blink_times,
         "segments": [asdict(s) for s in spec.segments],
