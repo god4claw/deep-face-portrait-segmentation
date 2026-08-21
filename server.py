@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import threading
 import time
@@ -12,10 +13,9 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel, Field
 from PIL import Image, UnidentifiedImageError
 
-from motion import MotionSpec, generate, prompt_to_spec
+from motion import BlinkSpec, MotionSpec, Segment, generate, segments_from_data
 from render import ASPECT_RATIOS, PortraitRenderer
 
 ROOT = Path(__file__).parent
@@ -44,10 +44,6 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Deep Randy Face local animation", version="0.2.0", lifespan=lifespan)
-
-
-class ParseRequest(BaseModel):
-    prompt: str = Field(min_length=1, max_length=500)
 
 
 def validate_image_bytes(data: bytes) -> tuple[Image.Image, str]:
@@ -102,12 +98,23 @@ def set_job(job_id: str, **changes) -> None:
             jobs[job_id].update(changes)
 
 
-def run_job(job_id: str, photo_path: Path, prompt: str, mode: str,
-            zoom: float, gaze: float, brow: float, aspect: str, fit: str, prefer_nvenc: bool) -> None:
+def parse_segments(raw: str) -> list[Segment]:
+    try:
+        value = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("segments_json must be valid JSON") from exc
+    return segments_from_data(value)
+
+
+def run_job(job_id: str, photo_path: Path, segments: list[Segment], mode: str,
+            duration: float, blink_rate: float, zoom: float, gaze: float, brow: float,
+            aspect: str, fit: str, prefer_nvenc: bool) -> None:
     try:
         set_job(job_id, status="running", stage="loading models", progress=0.01)
         fps = 15 if mode == "preview" else 30
-        track = generate(prompt, MotionSpec(fps=fps), zoom=zoom, gaze=gaze, brow=brow)
+        spec = MotionSpec(fps=fps, duration=duration, segments=segments,
+                          blink=BlinkSpec(rate_per_min=blink_rate))
+        track = generate(spec, zoom=zoom, gaze=gaze, brow=brow)
         output = OUT / f"{job_id}.mp4"
 
         def on_progress(value: float, stage: str) -> None:
@@ -115,6 +122,8 @@ def run_job(job_id: str, photo_path: Path, prompt: str, mode: str,
 
         meta = get_renderer().render(track, photo_path, output, preview=mode == "preview", aspect=aspect, fit=fit,
                                      prefer_nvenc=prefer_nvenc, progress=on_progress)
+        meta["applied_targets"] = sorted({segment.target for segment in segments})
+        meta["body_stage"] = "lower-frame-affine" if any(segment.target != "face" for segment in segments) else "none"
         if not output.exists() or output.stat().st_size == 0:
             raise RuntimeError("renderer returned without a non-empty MP4")
         set_job(job_id, status="complete", progress=1.0, stage="complete",
@@ -141,7 +150,7 @@ async def upload(photo: UploadFile = File(...)):
     data = await photo.read(MAX_UPLOAD_BYTES + 1)
     try:
         image, photo_id = validate_image_bytes(data)
-    except ValueError as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
     path = UPLOADS / f"{photo_id}.jpg"
     if not path.exists():
@@ -160,28 +169,28 @@ def photo(photo_id: str):
     return FileResponse(path, media_type="image/jpeg")
 
 
-@app.post("/api/parse")
-def parse_prompt(request: ParseRequest):
-    spec = prompt_to_spec(request.prompt)
-    return {"segments": [segment.__dict__ for segment in spec.segments],
-            "duration": spec.total_duration(), "n_frames": spec.n_frames(), "fps": spec.fps}
-
-
 @app.post("/api/render")
-def create_render(photo_id: str = Form(...), prompt: str = Form(...), mode: str = Form("preview"),
+def create_render(photo_id: str = Form(...), segments_json: str = Form("[]"), mode: str = Form("preview"),
+                  duration: float = Form(3.0), blink_rate: float = Form(17.0),
                   zoom: float = Form(0.0), gaze: float = Form(0.0), brow: float = Form(0.0),
                   aspect: str = Form("source"), fit: str = Form("contain"),
                   prefer_nvenc: bool = Form(True)):
     if mode not in {"preview", "final"}:
         raise HTTPException(400, "mode must be preview or final")
-    if not prompt.strip() or len(prompt) > 500:
-        raise HTTPException(400, "prompt must be 1-500 characters")
+    if duration < 0.1 or duration > 300:
+        raise HTTPException(400, "duration must be between 0.1 and 300 seconds")
+    if blink_rate < 0 or blink_rate > 120:
+        raise HTTPException(400, "blink rate must be between 0 and 120 per minute")
     if any(value < 0 or value > 1 for value in (zoom, gaze, brow)):
         raise HTTPException(400, "control values must be between 0 and 1")
     if aspect not in ASPECT_RATIOS:
         raise HTTPException(400, "unsupported aspect ratio")
     if fit not in {"contain", "cover"}:
         raise HTTPException(400, "fit must be contain or cover")
+    try:
+        segments = parse_segments(segments_json)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not valid_hex_id(photo_id, 64):
         raise HTTPException(400, "invalid photo id")
     photo_path = UPLOADS / f"{photo_id}.jpg"
@@ -193,7 +202,8 @@ def create_render(photo_id: str = Form(...), prompt: str = Form(...), mode: str 
         job_id = uuid.uuid4().hex
         jobs[job_id] = {"job_id": job_id, "status": "queued", "progress": 0.0,
                         "stage": "queued", "mode": mode, "created_at": time.time()}
-    executor.submit(run_job, job_id, photo_path, prompt.strip(), mode, zoom, gaze, brow, aspect, fit, prefer_nvenc)
+    executor.submit(run_job, job_id, photo_path, segments, mode, duration, blink_rate,
+                    zoom, gaze, brow, aspect, fit, prefer_nvenc)
     return {"job_id": job_id, "status_url": f"/api/job/{job_id}"}
 
 

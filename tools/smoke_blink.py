@@ -18,7 +18,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--liveportrait-root", type=Path, required=True)
     args = parser.parse_args()
-    track = generate("поворот направо на 8 градусов", MotionSpec(fps=15, duration=1.0))
+    track = generate(MotionSpec(fps=15, duration=1.0, segments=[]))
     track["eye_open"][:] = 1.0
     track["eye_open"][5:10] = np.array([0.65, 0.2, 0.0, 0.3, 0.75], dtype=np.float32)
     renderer = PortraitRenderer(args.liveportrait_root)

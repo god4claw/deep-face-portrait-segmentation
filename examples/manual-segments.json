@@ -1,0 +1,5 @@
+[
+  {"target": "face", "axis": "yaw", "frm": 0, "to": 20, "start": 0.6, "duration": 0.55},
+  {"target": "neck", "axis": "yaw", "frm": 0, "to": 5, "start": 0.6, "duration": 0.55},
+  {"target": "torso", "axis": "roll", "frm": 0, "to": 2, "start": 0.6, "duration": 0.8}
+]

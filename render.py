@@ -19,7 +19,7 @@ import imageio_ffmpeg
 import numpy as np
 from PIL import Image
 
-from motion import generate, to_json
+from motion import MotionSpec, Segment, generate, segments_from_data, to_json
 
 Progress = Callable[[float, str], None]
 ASPECT_RATIOS = {
@@ -89,6 +89,27 @@ def frame_to_canvas(frame: np.ndarray, aspect: str, fit: str, max_h: int) -> np.
     left = max(0, (resized.width - canvas_w) // 2)
     top = max(0, (resized.height - canvas_h) // 2)
     return np.asarray(resized.crop((left, top, left + canvas_w, top + canvas_h)))
+
+
+def apply_body_motion(image_rgb: np.ndarray, body_yaw: float, body_pitch: float,
+                      body_roll: float, *, y_start_ratio: float = 0.40) -> np.ndarray:
+    """Apply a conservative lower-frame affine motion before face pasteback."""
+    import cv2
+
+    if abs(body_yaw) + abs(body_pitch) + abs(body_roll) < 1e-5:
+        return image_rgb
+    height, width = image_rgb.shape[:2]
+    center = (width / 2, height / 2)
+    matrix = cv2.getRotationMatrix2D(center, float(body_roll) * 0.18, 1.0)
+    matrix[0, 2] += float(body_yaw) * 0.45
+    matrix[1, 2] -= float(body_pitch) * 0.30
+    warped = cv2.warpAffine(image_rgb, matrix, (width, height), flags=cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_REFLECT_101)
+    mask = np.zeros((height, width), dtype=np.float32)
+    y_start = min(height - 1, max(0, int(height * y_start_ratio)))
+    mask[y_start:, :] = 1.0
+    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=max(3.0, height * 0.018))[:, :, None]
+    return np.clip(mask * warped + (1.0 - mask) * image_rgb, 0, 255).astype(np.uint8)
 
 
 class PortraitRenderer:
@@ -205,7 +226,10 @@ class PortraitRenderer:
                         x_d = x_d + self.wrapper.retarget_eye(state.x_s, combined)
                     x_d = self.wrapper.stitching(state.x_s, x_d)
                     crop_frame = self.wrapper.parse_output(self.wrapper.warp_decode(state.f_s, state.x_s, x_d)["out"])[0]
-                    frame = paste_back(crop_frame, state.m_c2o, state.image_rgb, state.mask_ori)
+                    body_base = apply_body_motion(state.image_rgb, float(track["body_yaw"][i]),
+                                                  float(track["body_pitch"][i]),
+                                                  float(track["body_roll"][i]))
+                    frame = paste_back(crop_frame, state.m_c2o, body_base, state.mask_ori)
                     frame = frame_to_canvas(frame, aspect, fit, max_h)
                     Image.fromarray(frame).save(frame_dir / f"{i:06d}.png", compress_level=1)
                     callback(0.08 + 0.80 * (i + 1) / n_frames, f"rendering {i + 1}/{n_frames}")
@@ -219,7 +243,10 @@ class PortraitRenderer:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render LivePortrait motion tracks to MP4")
     parser.add_argument("--src", type=Path, required=True)
-    parser.add_argument("--prompt", default="поворот направо на 20 градусов")
+    parser.add_argument("--segments-json", type=Path,
+                        help="JSON list of manual target/axis/from/to/start/duration segments")
+    parser.add_argument("--duration", type=float, default=3.0)
+    parser.add_argument("--blink-rate", type=float, default=17.0)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--liveportrait-root", type=Path,
                         default=Path(os.environ.get("LIVEPORTRAIT_ROOT", r"C:\Users\windows11\crazyrandypipe\LivePortrait")))
@@ -232,7 +259,10 @@ def main() -> None:
     parser.add_argument("--fit", choices=("contain", "cover"), default="contain")
     args = parser.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    track = generate(args.prompt, zoom=args.zoom, gaze=args.gaze, brow=args.brow)
+    data = json.loads(args.segments_json.read_text(encoding="utf-8")) if args.segments_json else []
+    segments = segments_from_data(data)
+    track = generate(MotionSpec(fps=15 if args.preview else 30, duration=args.duration, segments=segments),
+                     zoom=args.zoom, gaze=args.gaze, brow=args.brow)
     to_json(track, str(args.out.with_suffix(".motion.json")))
     renderer = PortraitRenderer(args.liveportrait_root)
     meta = renderer.render(track, args.src, args.out, preview=args.preview, aspect=args.aspect, fit=args.fit,
