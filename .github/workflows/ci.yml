@@ -11,4 +11,9 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install -r requirements.txt
+      # render.apply_body_motion импортирует cv2. В рабочем окружении он приходит
+      # вместе с установкой LivePortrait, поэтому в requirements.txt его нет -
+      # там только слой веб/тестов. На чистом раннере ставим отдельно и headless:
+      # GUI-библиотеки в CI не нужны.
+      - run: python -m pip install opencv-python-headless
       - run: python -m pytest -q
