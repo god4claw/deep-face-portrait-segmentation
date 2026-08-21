@@ -11,7 +11,9 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 
 BLINK_PRESETS = {"rest": 17.0, "talking": 23.0, "reading": 6.0, "nervous": 32.0}
-AXES = ("yaw", "pitch", "roll")
+# zoom задаётся в процентах: +12 это наезд на 12%, -12 отъезд. Остальные оси - градусы.
+AXES = ("yaw", "pitch", "roll", "zoom")
+ROTATION_AXES = ("yaw", "pitch", "roll")
 TARGETS = ("face", "neck", "torso", "clothes")
 DEFAULT_TAIL_SEC = 0.70
 
@@ -54,11 +56,42 @@ class BlinkSpec:
 
 
 @dataclass
+class GazeSpec:
+    """Взгляд как последовательность фиксаций, а не плавная синусоида.
+
+    Саккада длится 20-30 мс, то есть меньше кадра при 30 fps - на видео она
+    мгновенная. Живым взгляд делает не сама саккада, а ритм: фиксация 200-400 мс,
+    скачок, снова фиксация. Плавный дрейф вместо этого читается как кукольный.
+    """
+    fixation_ms: float = 280.0      # медиана длительности фиксации
+    fixation_sigma: float = 0.45    # логнормальный разброс
+    amplitude: float = 4.0          # типичный разброс точек фиксации
+    centering: float = 0.55         # тяга обратно к центру (0 - блуждание, 1 - всегда центр)
+    drift: float = 0.30             # микродрейф внутри фиксации
+    vor_gain: float = 0.95          # контрвращение против движения головы
+    vor_decay_ms: float = 260.0     # за сколько глаза догоняют цель после поворота
+
+
+@dataclass
+class BrowSpec:
+    """Брови лежат в нейтрали и двигаются событиями, а не висят поднятыми."""
+    events_per_min: float = 14.0
+    rise_ms: float = 120.0
+    hold_ms: float = 160.0
+    fall_ms: float = 260.0
+    amplitude: float = 3.0
+    gaze_coupling: float = 0.25     # брови немного следуют за взглядом по вертикали
+    on_gaze_shift: float = 0.45     # доля событий, привязанных к крупным скачкам взгляда
+
+
+@dataclass
 class MotionSpec:
     fps: int = 30
     duration: float | None = 3.0
     segments: list[Segment] = field(default_factory=list)
     blink: BlinkSpec = field(default_factory=BlinkSpec)
+    gaze: GazeSpec = field(default_factory=GazeSpec)
+    brow: BrowSpec = field(default_factory=BrowSpec)
     micro_amp_deg: float = 1.4
     micro_freq_hz: tuple = (0.13, 0.29, 0.47)
     seed: int | None = 42
@@ -162,18 +195,129 @@ def blink_track(spec: MotionSpec, rng: np.random.Generator) -> tuple[np.ndarray,
     return track, times
 
 
+def _fixation_times(spec: MotionSpec, rng: np.random.Generator) -> list[float]:
+    """Моменты саккад. Длительность фиксации логнормальная, 120-900 мс."""
+    median = spec.gaze.fixation_ms / 1000.0
+    times, time = [], 0.0
+    while time < spec.total_duration():
+        times.append(time)
+        step = float(rng.lognormal(np.log(median), spec.gaze.fixation_sigma))
+        time += float(np.clip(step, 0.12, 0.9))
+    return times
+
+
+def _vor(spec: MotionSpec, head: np.ndarray) -> np.ndarray:
+    """Вестибуло-окулярный рефлекс: глаза контрвращаются во время поворота головы,
+    затем догоняют цель. Накопитель с экспоненциальным затуханием - поэтому это
+    переходный процесс, а не постоянное смещение при повёрнутой голове."""
+    decay = float(np.exp(-1.0 / spec.fps / max(spec.gaze.vor_decay_ms / 1000.0, 1e-3)))
+    delta = np.diff(head, prepend=head[:1])
+    out = np.zeros(head.shape[0], dtype=np.float64)
+    accumulator = 0.0
+    for i, step in enumerate(delta):
+        accumulator = accumulator * decay - spec.gaze.vor_gain * float(step)
+        out[i] = accumulator
+    return out
+
+
+def gaze_tracks(spec: MotionSpec, yaw: np.ndarray, pitch: np.ndarray,
+                rng: np.random.Generator, gain: float) -> tuple[np.ndarray, np.ndarray]:
+    n = spec.n_frames()
+    gain = float(np.clip(gain, 0.0, 1.0))
+    if gain <= 0.0:
+        zero = np.zeros(n, dtype=np.float32)
+        return zero, zero.copy()
+
+    cfg = spec.gaze
+    idx = np.arange(n)
+    # саккада 25 мс: при 30 fps это один кадр, то есть практически мгновенно
+    ramp = max(1.0, 0.025 * spec.fps)
+
+    fix_x = np.zeros(n, dtype=np.float64)
+    fix_y = np.zeros(n, dtype=np.float64)
+    point_x = point_y = 0.0
+    for start in _fixation_times(spec, rng):
+        # затухающее блуждание: точка уходит от центра, но её тянет обратно
+        next_x = (1.0 - cfg.centering) * point_x + rng.normal(0.0, cfg.amplitude)
+        next_y = (1.0 - cfg.centering) * point_y + rng.normal(0.0, cfg.amplitude * 0.6)
+        step = _min_jerk((idx - start * spec.fps) / ramp)
+        fix_x += (next_x - point_x) * step
+        fix_y += (next_y - point_y) * step
+        point_x, point_y = next_x, next_y
+
+    # микродрейф внутри фиксации - глаз не стоит идеально
+    drift_x = micro_motion(spec, rng, cfg.drift / max(spec.micro_amp_deg, 1e-6))
+    drift_y = micro_motion(spec, rng, cfg.drift / max(spec.micro_amp_deg, 1e-6) * 0.7)
+
+    gaze_x = gain * (fix_x + drift_x + _vor(spec, yaw))
+    gaze_y = gain * (fix_y + drift_y + _vor(spec, pitch) * 0.7)
+    return gaze_x.astype(np.float32), gaze_y.astype(np.float32)
+
+
+def _brow_kernel(spec: MotionSpec) -> np.ndarray:
+    cfg = spec.brow
+    rise = max(1, round(cfg.rise_ms / 1000 * spec.fps))
+    hold = max(0, round(cfg.hold_ms / 1000 * spec.fps))
+    fall = max(1, round(cfg.fall_ms / 1000 * spec.fps))
+    up = _min_jerk(np.linspace(0, 1, rise + 1)[1:])
+    down = 1.0 - _min_jerk(np.linspace(0, 1, fall + 1)[1:])
+    return np.concatenate([up, np.ones(hold), down])
+
+
+def brow_track(spec: MotionSpec, gaze_y: np.ndarray, rng: np.random.Generator,
+               gain: float) -> np.ndarray:
+    """Нейтраль плюс редкие события. Постоянно поднятые брови читаются как удивление."""
+    n = spec.n_frames()
+    gain = float(np.clip(gain, 0.0, 1.0))
+    if gain <= 0.0 or spec.brow.events_per_min <= 0.0:
+        return np.zeros(n, dtype=np.float32)
+
+    cfg = spec.brow
+    kernel = _brow_kernel(spec)
+    track = np.zeros(n, dtype=np.float64)
+    duration = spec.total_duration()
+
+    mean_gap = 60.0 / cfg.events_per_min
+    # Первое событие ставим рано: при среднем интервале в несколько секунд
+    # на трёхсекундном клипе иначе не выпадает ни одного, и ползунок молчит.
+    events = []
+    time = float(rng.uniform(0.25, max(0.4, min(mean_gap, 0.45 * duration))))
+    while time < duration:
+        events.append(time)
+        time += float(rng.exponential(mean_gap))
+
+    # Часть событий привязана к крупным скачкам взгляда - живое лицо делает так же.
+    if cfg.on_gaze_shift > 0 and gaze_y.size > 2:
+        speed = np.abs(np.diff(gaze_y, prepend=gaze_y[:1]))
+        threshold = max(float(np.quantile(speed, 0.97)), 1e-6)
+        for index in np.flatnonzero(speed >= threshold):
+            if rng.random() < cfg.on_gaze_shift:
+                events.append(float(index) / spec.fps)
+
+    for event in events:
+        start = int(round(event * spec.fps))
+        piece = kernel[: max(0, n - start)] * float(rng.uniform(0.55, 1.0))
+        if piece.size:
+            track[start:start + piece.size] = np.maximum(track[start:start + piece.size], piece)
+
+    # брови немного следуют за вертикалью взгляда - это настоящая связка
+    return (gain * (cfg.amplitude * track + cfg.gaze_coupling * gaze_y)).astype(np.float32)
+
+
+def zoom_track(spec: MotionSpec, slider: float) -> np.ndarray:
+    """Сегменты с осью zoom (в процентах) плюс общий ползунок. Отъезд разрешён."""
+    n = spec.n_frames()
+    from_segments = render_axis(spec, "zoom") / 100.0
+    slider = float(np.clip(slider, -1.0, 1.0))
+    ramp = _min_jerk(np.arange(n) / max(spec.total_duration() * spec.fps, 1e-6))
+    return (1.0 + from_segments + slider * 0.08 * ramp).astype(np.float32)
+
+
 def artistic_tracks(spec: MotionSpec, yaw: np.ndarray, pitch: np.ndarray,
                     rng: np.random.Generator, *, zoom: float = 0.0,
                     gaze: float = 0.0, brow: float = 0.0) -> tuple[np.ndarray, ...]:
-    n = spec.n_frames()
-    t = np.arange(n, dtype=np.float32) / spec.fps
-    zoom_track = 1.0 + np.clip(zoom, 0.0, 1.0) * 0.08 * _min_jerk(t / max(spec.total_duration(), 1e-6))
-    phase_x, phase_y = rng.uniform(0, 2 * np.pi, size=2)
-    gaze_gain = np.clip(gaze, 0.0, 1.0)
-    gaze_x = gaze_gain * (-0.18 * yaw + 3.0 * np.sin(2 * np.pi * 0.23 * t + phase_x))
-    gaze_y = gaze_gain * (-0.12 * pitch + 2.0 * np.sin(2 * np.pi * 0.17 * t + phase_y))
-    brow_track = np.clip(brow, 0.0, 1.0) * (2.5 - 0.25 * gaze_y + 0.8 * np.sin(2 * np.pi * 0.13 * t))
-    return tuple(np.asarray(value, dtype=np.float32) for value in (zoom_track, gaze_x, gaze_y, brow_track))
+    gaze_x, gaze_y = gaze_tracks(spec, yaw, pitch, rng, gaze)
+    return (zoom_track(spec, zoom), gaze_x, gaze_y, brow_track(spec, gaze_y, rng, brow))
 
 
 def generate(spec: MotionSpec | None = None, *, zoom: float = 0.0,

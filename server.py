@@ -18,6 +18,11 @@ from PIL import Image, UnidentifiedImageError
 from motion import BlinkSpec, MotionSpec, Segment, generate, segments_from_data
 from render import ASPECT_RATIOS, PortraitRenderer
 
+try:  # разбор промта опционален: без него сервер работает полностью
+    import prompt_llm
+except Exception:  # noqa: BLE001 - отсутствие requests не должно ронять сервер
+    prompt_llm = None
+
 ROOT = Path(__file__).parent
 UPLOADS = ROOT / "uploads"
 OUT = ROOT / "out"
@@ -144,6 +149,31 @@ def health():
     return {"status": "ok", "model_loaded": renderer is not None, "active_jobs": active}
 
 
+@app.get("/api/llm")
+def llm_status():
+    """Есть ли локальная модель. UI по этому ответу решает, показывать ли поле промта."""
+    models = prompt_llm.available_models() if prompt_llm else []
+    known = [name for name in models if name.split(":")[0] in {"qwen3.5", "gemma4"}]
+    return {"available": bool(known), "models": known, "default": prompt_llm.DEFAULT_MODEL if prompt_llm else None}
+
+
+@app.post("/api/prompt")
+def prompt_to_segments(text: str = Form(...), model: str = Form("")):
+    """Черновик таймлайна из текста. Необязательный слой: ошибка тут ничего не ломает."""
+    if prompt_llm is None:
+        raise HTTPException(503, "модуль разбора промта недоступен")
+    try:
+        result = prompt_llm.parse_prompt(text, model=model or prompt_llm.DEFAULT_MODEL)
+        segments_from_data(result.segments)          # та же валидация, что и у боевого таймлайна
+    except prompt_llm.PromptLLMError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(422, f"модель вернула некорректный таймлайн: {exc}") from exc
+    return {"segments": result.segments, "duration": result.duration,
+            "blink_rate_per_min": result.blink_rate_per_min,
+            "model": result.model, "elapsed_sec": round(result.elapsed_sec, 2)}
+
+
 @app.post("/api/upload")
 async def upload(photo: UploadFile = File(...)):
     cleanup_old_files()
@@ -181,7 +211,9 @@ def create_render(photo_id: str = Form(...), segments_json: str = Form("[]"), mo
         raise HTTPException(400, "duration must be between 0.1 and 300 seconds")
     if blink_rate < 0 or blink_rate > 120:
         raise HTTPException(400, "blink rate must be between 0 and 120 per minute")
-    if any(value < 0 or value > 1 for value in (zoom, gaze, brow)):
+    if not -1.0 <= zoom <= 1.0:                      # отрицательный zoom - это отъезд
+        raise HTTPException(400, "zoom must be between -1 and 1")
+    if any(value < 0 or value > 1 for value in (gaze, brow)):
         raise HTTPException(400, "control values must be between 0 and 1")
     if aspect not in ASPECT_RATIOS:
         raise HTTPException(400, "unsupported aspect ratio")
