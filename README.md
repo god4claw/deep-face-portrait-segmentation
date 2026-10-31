@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/hero.png" alt="DEEP FACE — one frame in, one performance out" width="840" />
+  <img src="docs/hero.png" alt="DEEP FACE cover — a Vermeer portrait, a timeline, an MP4" width="840" />
+</p>
+
+<p align="center">
+  <sub>Reference portrait: Johannes Vermeer, <em>Girl with a Pearl Earring</em>, c. 1665 · public domain</sub>
 </p>
 
 <h1 align="center">DEEP FACE</h1>
@@ -389,6 +393,9 @@ describes what runs.
 [LivePortrait](https://github.com/KwaiVGI/LivePortrait) by KwaiVGI — the warping,
 decoding and retargeting code lives in that checkout, not here. FFmpeg through
 `imageio-ffmpeg` with a system fallback. FastAPI, Pillow, NumPy, Ollama.
+
+Cover: Johannes Vermeer, *Girl with a Pearl Earring* (c. 1665), public domain,
+via [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Meisje_met_de_parel.jpg).
 
 ---
 
